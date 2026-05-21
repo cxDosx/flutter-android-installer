@@ -146,6 +146,38 @@ Enter the Android SDK version to install [33]: abc
 
 ---
 
+## Non-Interactive Mode
+
+By default the scripts are interactive: they prompt for the SDK / NDK versions and a final confirmation. You can run them fully unattended with command-line flags — useful for CI pipelines, provisioning scripts, and automation.
+
+| Flag | Description |
+|---|---|
+| `-y`, `--non-interactive` | Skip all prompts and the confirmation step; use the default versions unless overridden. |
+| `--sdk <version>` | Android SDK version to install (default: `33`). |
+| `--ndk <version>` | Android NDK version to install (default: `28.2.13676358`). |
+| `-h`, `--help` | Show usage help and exit. |
+
+```bash
+# Run online with all defaults, no prompts
+bash <(curl -fsSL https://raw.githubusercontent.com/cxDosx/flutter-android-installer/main/install-flutter-android.sh) -y
+
+# Specify versions explicitly
+bash <(curl -fsSL https://raw.githubusercontent.com/cxDosx/flutter-android-installer/main/install-flutter-android.sh) --non-interactive --sdk 34 --ndk 27.0.12077973
+
+# Local file
+bash install-flutter-android.sh -y --sdk 34
+```
+
+The same flags work for `install-macos.sh`.
+
+A few details:
+
+- `--sdk` / `--ndk` can be passed **without** `--non-interactive`. The value is then shown as the default in the interactive prompt, so you can still review or change it.
+- In an environment with **no TTY at all** (such as a CI job), the scripts detect this and behave as if `--non-interactive` was passed, even without the flag.
+- Non-interactive mode only removes the script's *own* prompts. It cannot suppress a `sudo` password prompt (Linux) or a password prompt from the Homebrew installer (macOS). For a truly unattended run, use `root` / passwordless `sudo`, and on macOS pre-install Homebrew. When `--non-interactive` is set, the macOS script also passes `NONINTERACTIVE=1` to the Homebrew installer to skip its "press RETURN" step.
+
+---
+
 ## Install Locations
 
 | Item | Path (identical for both scripts) |
@@ -254,7 +286,7 @@ This usually happens when Homebrew installs the JDK but does not link it into th
 
 ### Q: Can it run non-interactively (all defaults)?
 
-In an environment with no TTY at all (such as CI), the script automatically skips the prompts and uses the defaults. If you want to force non-interactive mode in an environment that does have a terminal, feel free to open an issue requesting a `--non-interactive` flag.
+Yes. Pass the `-y` / `--non-interactive` flag, optionally with `--sdk` / `--ndk` to choose versions — see [Non-Interactive Mode](#non-interactive-mode) for details and examples. In an environment with no TTY at all (such as CI), the scripts switch to non-interactive behavior automatically, even without the flag.
 
 ---
 

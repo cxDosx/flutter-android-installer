@@ -6,7 +6,13 @@
 # Usage:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/cxDosx/flutter-android-installer/main/install-macos.sh)
 #   or locally:
-#   bash install-macos.sh
+#   bash install-macos.sh [OPTIONS]
+#
+# Options:
+#   -y, --non-interactive   Run without prompts; use defaults and skip confirmation.
+#       --sdk <version>     Android SDK version (default: 33).
+#       --ndk <version>     Android NDK version (default: 28.2.13676358).
+#   -h, --help              Show help and exit.
 #
 # Installs:
 #   - Homebrew (if not already installed)
@@ -30,6 +36,11 @@ FLUTTER_REPO="https://github.com/flutter/flutter.git"
 
 ANDROID_HOME="${HOME}/android-sdk"
 FLUTTER_HOME="${HOME}/flutter"
+
+# Runtime state (may be overridden by command-line flags)
+NON_INTERACTIVE=false
+SDK_VERSION_ARG=""
+NDK_VERSION_ARG=""
 
 # ============================================================================
 # Helper functions
@@ -67,7 +78,9 @@ prompt() {
     local default="$2"
     local var
 
-    if [[ ! -t 0 ]] && [[ ! -e /dev/tty ]]; then
+    # Non-interactive: forced via --non-interactive, or no TTY at all (e.g. CI).
+    # In both cases fall back to the default.
+    if [[ "$NON_INTERACTIVE" == true ]] || { [[ ! -t 0 ]] && [[ ! -e /dev/tty ]]; }; then
         echo "$default"
         return
     fi
@@ -99,6 +112,67 @@ validate_ndk_version() {
     if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         die "Invalid NDK version format, expected 'X.Y.Z', but got: '$v'"
     fi
+}
+
+# ============================================================================
+# Command-line arguments
+# ============================================================================
+
+usage() {
+    cat <<'EOF'
+Usage: bash install-macos.sh [OPTIONS]
+
+Options:
+  -y, --non-interactive   Run without prompts: use the default versions
+                          (or the values from --sdk / --ndk) and skip the
+                          confirmation step.
+      --sdk <version>     Android SDK version to install (default: 33).
+      --ndk <version>     Android NDK version to install
+                          (default: 28.2.13676358).
+  -h, --help              Show this help and exit.
+
+Examples:
+  bash install-macos.sh
+  bash install-macos.sh --non-interactive
+  bash install-macos.sh -y --sdk 34 --ndk 27.0.12077973
+EOF
+}
+
+# Parse command-line flags into the runtime-state globals
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -y|--non-interactive|--yes)
+                NON_INTERACTIVE=true
+                shift
+                ;;
+            --sdk)
+                [[ $# -ge 2 ]] || die "--sdk requires a value"
+                SDK_VERSION_ARG="$2"
+                shift 2
+                ;;
+            --sdk=*)
+                SDK_VERSION_ARG="${1#*=}"
+                shift
+                ;;
+            --ndk)
+                [[ $# -ge 2 ]] || die "--ndk requires a value"
+                NDK_VERSION_ARG="$2"
+                shift 2
+                ;;
+            --ndk=*)
+                NDK_VERSION_ARG="${1#*=}"
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1 (run with --help to see available options)"
+                ;;
+        esac
+    done
 }
 
 # ============================================================================
@@ -144,7 +218,12 @@ install_homebrew() {
 
     info "Homebrew not found, installing..."
     info "Enter your password if prompted for sudo"
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        # NONINTERACTIVE=1 stops the Homebrew installer from waiting on RETURN
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    else
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
 
     # Add brew to PATH for the current session
     if [[ -x "$BREW_PREFIX/bin/brew" ]]; then
@@ -380,15 +459,21 @@ verify() {
 # ============================================================================
 
 main() {
+    parse_args "$@"
+
     title "Flutter + Android build environment installer (macOS)"
 
     detect_macos
 
-    SDK_VERSION=$(prompt "Enter the Android SDK version to install" "$DEFAULT_SDK_VERSION")
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        info "Running in non-interactive mode (prompts skipped, defaults used)"
+    fi
+
+    SDK_VERSION=$(prompt "Enter the Android SDK version to install" "${SDK_VERSION_ARG:-$DEFAULT_SDK_VERSION}")
     validate_sdk_version "$SDK_VERSION"
     ok "SDK version: $SDK_VERSION"
 
-    NDK_VERSION=$(prompt "Enter the Android NDK version to install" "$DEFAULT_NDK_VERSION")
+    NDK_VERSION=$(prompt "Enter the Android NDK version to install" "${NDK_VERSION_ARG:-$DEFAULT_NDK_VERSION}")
     validate_ndk_version "$NDK_VERSION"
     ok "NDK version: $NDK_VERSION"
 
