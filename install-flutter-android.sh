@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+#
+# One-command installer for a Flutter + Android build environment.
+# Targets Debian / Ubuntu / CentOS / RHEL / Rocky / AlmaLinux / Fedora.
+#
+# Usage:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/cxDosx/flutter-android-installer/main/install-flutter-android.sh)
+#   or locally:
+#   bash install-flutter-android.sh
+#
+# Installs:
+#   - JDK 17
+#   - Android command-line tools
+#   - Android SDK Platform (user-specified version, default 33)
+#   - Android Build Tools (matching the SDK version)
+#   - Android NDK (user-specified version, default 28.2.13676358)
+#   - Flutter (stable channel)
+
+set -euo pipefail
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+DEFAULT_SDK_VERSION="33"
+DEFAULT_NDK_VERSION="28.2.13676358"
+CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+FLUTTER_CHANNEL="stable"
+FLUTTER_REPO="https://github.com/flutter/flutter.git"
+
+ANDROID_HOME="${HOME}/android-sdk"
+FLUTTER_HOME="${HOME}/flutter"
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+# Colored output (only when stdout is a terminal)
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
+
+info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
+ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+title() { echo -e "\n${BOLD}━━━ $* ━━━${NC}\n"; }
+
+die() {
+    err "$*"
+    exit 1
+}
+
+# Check whether a command exists
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# Read user input from /dev/tty (works even under `curl | bash`)
+prompt() {
+    local message="$1"
+    local default="$2"
+    local var
+
+    if [[ ! -t 0 ]] && [[ ! -e /dev/tty ]]; then
+        # Fully non-interactive (e.g. CI): fall back to the default
+        echo "$default"
+        return
+    fi
+
+    # Read from /dev/tty so a piped stdin does not block input
+    echo -en "${BOLD}${message}${NC} [${GREEN}${default}${NC}]: " > /dev/tty
+    read -r var < /dev/tty || var=""
+
+    if [[ -z "$var" ]]; then
+        echo "$default"
+    else
+        echo "$var"
+    fi
+}
+
+# Validate: integer only, range 21-99 (covers realistic Android SDK versions)
+validate_sdk_version() {
+    local v="$1"
+    if [[ ! "$v" =~ ^[0-9]+$ ]]; then
+        die "SDK version must be an integer, but got: '$v'"
+    fi
+    if (( v < 21 || v > 99 )); then
+        die "SDK version out of reasonable range (21-99), but got: '$v'"
+    fi
+}
+
+# Validate: NDK version must look like X.Y.ZZZZZZZZ
+validate_ndk_version() {
+    local v="$1"
+    if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        die "Invalid NDK version format, expected 'X.Y.Z', but got: '$v'"
+    fi
+}
+
+# ============================================================================
+# OS detection
+# ============================================================================
+
+detect_os() {
+    if [[ ! -f /etc/os-release ]]; then
+        die "Unable to identify the system (/etc/os-release not found)"
+    fi
+
+    # shellcheck disable=SC1091
+    . /etc/os-release
+
+    OS_ID="${ID:-unknown}"
+    OS_ID_LIKE="${ID_LIKE:-}"
+
+    case "$OS_ID" in
+        debian|ubuntu)
+            PKG_MANAGER="apt"
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            PKG_MANAGER="dnf"
+            has dnf || PKG_MANAGER="yum"
+            ;;
+        *)
+            # Fallback: inspect ID_LIKE
+            if [[ "$OS_ID_LIKE" == *"debian"* ]]; then
+                PKG_MANAGER="apt"
+            elif [[ "$OS_ID_LIKE" == *"rhel"* ]] || [[ "$OS_ID_LIKE" == *"fedora"* ]]; then
+                PKG_MANAGER="dnf"
+                has dnf || PKG_MANAGER="yum"
+            else
+                die "Unsupported system: $OS_ID (supports Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora)"
+            fi
+            ;;
+    esac
+
+    info "Detected system: ${OS_ID} (using ${PKG_MANAGER})"
+}
+
+# Use sudo unless already running as root
+SUDO=""
+need_sudo() {
+    if [[ "$EUID" -ne 0 ]]; then
+        has sudo || die "sudo is required but not installed"
+        SUDO="sudo"
+    fi
+}
+
+# ============================================================================
+# Install system dependencies
+# ============================================================================
+
+install_system_deps() {
+    title "Installing system dependencies"
+
+    case "$PKG_MANAGER" in
+        apt)
+            info "Updating apt index..."
+            $SUDO apt update -y
+            info "Installing base tools and JDK 17..."
+            $SUDO apt install -y \
+                curl git unzip wget xz-utils zip ca-certificates \
+                openjdk-17-jdk libglu1-mesa
+            ;;
+        dnf|yum)
+            info "Installing base tools and JDK 17..."
+            $SUDO "$PKG_MANAGER" install -y \
+                curl git unzip wget xz tar zip ca-certificates \
+                java-17-openjdk-devel mesa-libGLU || \
+                $SUDO "$PKG_MANAGER" install -y \
+                    curl git unzip wget xz tar zip ca-certificates \
+                    java-17-openjdk-devel
+            ;;
+    esac
+
+    # Verify Java
+    if ! has java; then
+        die "JDK installation failed: the 'java' command is unavailable"
+    fi
+
+    local java_version
+    java_version=$(java -version 2>&1 | head -1)
+    ok "Java installed: $java_version"
+}
+
+# Determine JAVA_HOME
+detect_java_home() {
+    local java_bin
+    java_bin=$(readlink -f "$(command -v java)")
+    # java_bin looks like /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+    JAVA_HOME_DETECTED="${java_bin%/bin/java}"
+    info "Detected JAVA_HOME: $JAVA_HOME_DETECTED"
+}
+
+# ============================================================================
+# Install Android SDK
+# ============================================================================
+
+install_android_sdk() {
+    title "Installing Android SDK"
+
+    if [[ -d "$ANDROID_HOME/cmdline-tools/latest" ]]; then
+        info "Android cmdline-tools already present, skipping download"
+    else
+        info "Downloading Android command-line tools..."
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        cd "$ANDROID_HOME/cmdline-tools"
+
+        local tmpzip="cmdline-tools.zip"
+        wget -q --show-progress -O "$tmpzip" "$CMDLINE_TOOLS_URL"
+
+        unzip -qo "$tmpzip"
+        mv cmdline-tools latest
+        rm -f "$tmpzip"
+        ok "command-line tools installed to $ANDROID_HOME/cmdline-tools/latest"
+    fi
+
+    # Add sdkmanager to PATH for the duration of this script run
+    export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+    export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"
+    export JAVA_HOME="$JAVA_HOME_DETECTED"
+
+    info "Accepting Android SDK licenses..."
+    yes 2>/dev/null | sdkmanager --licenses > /dev/null || true
+
+    info "Installing platform-tools, SDK Platform ${SDK_VERSION}, Build Tools ${SDK_VERSION}.0.0..."
+    sdkmanager \
+        "platform-tools" \
+        "platforms;android-${SDK_VERSION}" \
+        "build-tools;${SDK_VERSION}.0.0"
+
+    ok "Android SDK Platform ${SDK_VERSION} installed"
+}
+
+# ============================================================================
+# Install NDK
+# ============================================================================
+
+install_ndk() {
+    title "Installing Android NDK ${NDK_VERSION}"
+
+    local ndk_dir="$ANDROID_HOME/ndk/$NDK_VERSION"
+
+    # If the directory exists but is incomplete, remove it and reinstall
+    if [[ -d "$ndk_dir" ]] && [[ ! -f "$ndk_dir/source.properties" ]]; then
+        warn "Incomplete NDK directory detected (no source.properties), cleaning up..."
+        rm -rf "$ndk_dir"
+    fi
+
+    if [[ -f "$ndk_dir/source.properties" ]]; then
+        info "NDK $NDK_VERSION already installed and complete, skipping"
+        return
+    fi
+
+    info "Downloading and installing NDK $NDK_VERSION..."
+    sdkmanager --install "ndk;$NDK_VERSION"
+
+    # Re-verify after installation
+    if [[ ! -f "$ndk_dir/source.properties" ]]; then
+        die "NDK installation failed: $ndk_dir/source.properties not found. Make sure version '$NDK_VERSION' is available in the Google repository"
+    fi
+
+    ok "NDK $NDK_VERSION installed"
+}
+
+# ============================================================================
+# Install Flutter
+# ============================================================================
+
+install_flutter() {
+    title "Installing Flutter"
+
+    if [[ -d "$FLUTTER_HOME" ]]; then
+        info "Flutter directory already exists, skipping clone"
+    else
+        info "Cloning Flutter $FLUTTER_CHANNEL..."
+        git clone --depth 1 -b "$FLUTTER_CHANNEL" "$FLUTTER_REPO" "$FLUTTER_HOME"
+    fi
+
+    export PATH="$FLUTTER_HOME/bin:$PATH"
+
+    info "Precaching the Android toolchain..."
+    flutter precache --android
+
+    info "Accepting Android licenses (via Flutter)..."
+    yes 2>/dev/null | flutter doctor --android-licenses > /dev/null || true
+
+    ok "Flutter installed to $FLUTTER_HOME"
+}
+
+# ============================================================================
+# Configure shell environment variables
+# ============================================================================
+
+setup_shell_env() {
+    title "Configuring shell environment variables"
+
+    case "$(basename "${SHELL:-/bin/bash}")" in
+        zsh)  RCFILE="$HOME/.zshrc" ;;
+        bash) RCFILE="$HOME/.bashrc" ;;
+        *)    RCFILE="$HOME/.profile" ;;
+    esac
+
+    touch "$RCFILE"
+
+    local marker_begin="# >>> flutter-android-env (managed by install script) >>>"
+    local marker_end="# <<< flutter-android-env <<<"
+
+    # Remove any previous block
+    if grep -q "$marker_begin" "$RCFILE"; then
+        info "Existing config block detected, replacing it..."
+        # Delete the old block with sed, then drop the temporary backup
+        sed -i.bak "/$marker_begin/,/$marker_end/d" "$RCFILE"
+        rm -f "$RCFILE.bak"
+    fi
+
+    # Append the new block
+    cat >> "$RCFILE" <<EOF
+$marker_begin
+export JAVA_HOME="$JAVA_HOME_DETECTED"
+export ANDROID_HOME="$ANDROID_HOME"
+export ANDROID_SDK_ROOT="\$ANDROID_HOME"
+export PATH="\$PATH:\$ANDROID_HOME/cmdline-tools/latest/bin"
+export PATH="\$PATH:\$ANDROID_HOME/platform-tools"
+export PATH="\$PATH:\$ANDROID_HOME/build-tools/${SDK_VERSION}.0.0"
+export PATH="\$PATH:$FLUTTER_HOME/bin"
+$marker_end
+EOF
+
+    ok "Environment variables written to $RCFILE"
+    info "Log in again or run 'source $RCFILE' to apply them"
+}
+
+# ============================================================================
+# Verify
+# ============================================================================
+
+verify() {
+    title "Verifying the installation"
+
+    info "Flutter version:"
+    flutter --version || die "Flutter verification failed"
+
+    echo
+    info "Running flutter doctor (focus on Flutter / Android toolchain):"
+    flutter doctor || true
+
+    echo
+    ok "Installation complete 🎉"
+    echo
+    echo -e "${BOLD}Next steps:${NC}"
+    echo "  1. Run ${GREEN}source $RCFILE${NC} or log in again"
+    echo "  2. In your Flutter project directory, run ${GREEN}flutter pub get && flutter build apk --debug${NC}"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    title "Flutter + Android build environment installer"
+
+    detect_os
+    need_sudo
+
+    # Interactive parameter input
+    SDK_VERSION=$(prompt "Enter the Android SDK version to install" "$DEFAULT_SDK_VERSION")
+    validate_sdk_version "$SDK_VERSION"
+    ok "SDK version: $SDK_VERSION"
+
+    NDK_VERSION=$(prompt "Enter the Android NDK version to install" "$DEFAULT_NDK_VERSION")
+    validate_ndk_version "$NDK_VERSION"
+    ok "NDK version: $NDK_VERSION"
+
+    echo
+    info "About to install the following components:"
+    echo "  - JDK 17"
+    echo "  - Android SDK Platform $SDK_VERSION"
+    echo "  - Android Build Tools $SDK_VERSION.0.0"
+    echo "  - Android NDK $NDK_VERSION"
+    echo "  - Flutter ($FLUTTER_CHANNEL channel)"
+    echo "  - Install directories: $ANDROID_HOME, $FLUTTER_HOME"
+    echo
+
+    local confirm
+    confirm=$(prompt "Continue? (Y/n)" "y")
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        info "Cancelled"
+        exit 0
+    fi
+
+    install_system_deps
+    detect_java_home
+    install_android_sdk
+    install_ndk
+    install_flutter
+    setup_shell_env
+    verify
+}
+
+main "$@"

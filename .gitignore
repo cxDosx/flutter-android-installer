@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Backups created by sed/perl in-place edits
+*.bak
