@@ -10,6 +10,7 @@
 #
 # Options:
 #   -y, --non-interactive   Run without prompts; skip confirmation.
+#       --flutter <version> Flutter version tag, e.g. 3.24.0 (default: latest stable).
 #   -h, --help              Show help and exit.
 #
 # Installs / configures:
@@ -17,7 +18,8 @@
 #   - Rosetta 2 (Apple Silicon only)
 #   - Xcode license acceptance + first-launch components
 #   - CocoaPods (via Homebrew)
-#   - Flutter (stable channel) with iOS artifacts precached
+#   - Flutter (user-specified version, or latest stable if unspecified) with iOS
+#     artifacts precached
 #
 # Note: the full Xcode app cannot be installed non-interactively. It must come
 # from the Mac App Store. If it is missing, this script guides you there and
@@ -38,6 +40,7 @@ XCODE_WEB_URL="https://apps.apple.com/app/xcode/id497799835"
 
 # Runtime state (may be overridden by command-line flags)
 NON_INTERACTIVE=false
+FLUTTER_VERSION_ARG=""
 
 # ============================================================================
 # Helper functions
@@ -68,6 +71,19 @@ die() {
 
 # Check whether a command exists
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# Validate: Flutter version must look like X.Y.Z (pre-release suffix like
+# '-1.0.pre' allowed) AND must exist as a tag in the official Flutter repo.
+validate_flutter_version() {
+    local v="$1"
+    if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.\-]+)?$ ]]; then
+        die "Invalid Flutter version format, expected 'X.Y.Z' (e.g. 3.24.0), but got: '$v'"
+    fi
+    info "Checking that Flutter $v exists in the official repository..."
+    if ! git ls-remote --tags --exit-code "$FLUTTER_REPO" "refs/tags/$v" >/dev/null 2>&1; then
+        die "Flutter version '$v' was not found in the official repository. See https://docs.flutter.dev/release/archive for the list of valid versions."
+    fi
+}
 
 # Read user input from /dev/tty (works even under `curl | bash`)
 prompt() {
@@ -102,11 +118,14 @@ Usage: bash install-ios-macos.sh [OPTIONS]
 
 Options:
   -y, --non-interactive   Run without prompts and skip the confirmation step.
+      --flutter <version> Flutter version tag to install, e.g. 3.24.0.
+                          If omitted, the latest stable release is used.
   -h, --help              Show this help and exit.
 
 Examples:
   bash install-ios-macos.sh
   bash install-ios-macos.sh --non-interactive
+  bash install-ios-macos.sh -y --flutter 3.24.0
 EOF
 }
 
@@ -116,6 +135,15 @@ parse_args() {
         case "$1" in
             -y|--non-interactive|--yes)
                 NON_INTERACTIVE=true
+                shift
+                ;;
+            --flutter|--flutter-version)
+                [[ $# -ge 2 ]] || die "$1 requires a value"
+                FLUTTER_VERSION_ARG="$2"
+                shift 2
+                ;;
+            --flutter=*|--flutter-version=*)
+                FLUTTER_VERSION_ARG="${1#*=}"
                 shift
                 ;;
             -h|--help)
@@ -343,8 +371,14 @@ install_flutter() {
     if [[ -d "$FLUTTER_HOME" ]]; then
         info "Flutter directory already exists, skipping clone"
     else
-        info "Cloning Flutter $FLUTTER_CHANNEL..."
-        git clone --depth 1 -b "$FLUTTER_CHANNEL" "$FLUTTER_REPO" "$FLUTTER_HOME"
+        local flutter_ref="$FLUTTER_CHANNEL"
+        local flutter_desc="$FLUTTER_CHANNEL channel (latest)"
+        if [[ -n "$FLUTTER_VERSION" ]]; then
+            flutter_ref="$FLUTTER_VERSION"
+            flutter_desc="version $FLUTTER_VERSION"
+        fi
+        info "Cloning Flutter $flutter_desc..."
+        git clone --depth 1 -b "$flutter_ref" "$FLUTTER_REPO" "$FLUTTER_HOME"
     fi
 
     export PATH="$FLUTTER_HOME/bin:$PATH"
@@ -438,13 +472,28 @@ main() {
     # Fail fast if Xcode is missing — it needs a manual App Store install
     ensure_xcode
 
+    local flutter_input
+    flutter_input=$(prompt "Enter the Flutter version (or 'latest')" "${FLUTTER_VERSION_ARG:-latest}")
+    flutter_input="${flutter_input#v}"
+    if [[ -z "$flutter_input" || "$flutter_input" == "latest" ]]; then
+        FLUTTER_VERSION=""
+        ok "Flutter: latest ($FLUTTER_CHANNEL channel)"
+    else
+        validate_flutter_version "$flutter_input"
+        FLUTTER_VERSION="$flutter_input"
+        ok "Flutter version: $FLUTTER_VERSION"
+    fi
+
+    local flutter_label="$FLUTTER_CHANNEL channel (latest)"
+    [[ -n "$FLUTTER_VERSION" ]] && flutter_label="version $FLUTTER_VERSION"
+
     echo
     info "About to install / configure the following:"
     echo "  - Homebrew (if not already installed)"
     echo "  - Rosetta 2 (Apple Silicon only)"
     echo "  - Xcode: $XCODE_APP (accept license + first-launch setup)"
     echo "  - CocoaPods (via Homebrew)"
-    echo "  - Flutter ($FLUTTER_CHANNEL channel) with iOS artifacts"
+    echo "  - Flutter ($flutter_label) with iOS artifacts"
     echo "  - Install directory: $FLUTTER_HOME"
     echo
 

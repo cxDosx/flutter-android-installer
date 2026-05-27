@@ -12,6 +12,7 @@
 #   -y, --non-interactive   Run without prompts; use defaults and skip confirmation.
 #       --sdk <version>     Android SDK version (default: 33).
 #       --ndk <version>     Android NDK version (default: 28.2.13676358).
+#       --flutter <version> Flutter version tag, e.g. 3.24.0 (default: latest stable).
 #   -h, --help              Show help and exit.
 #
 # Installs:
@@ -21,7 +22,7 @@
 #   - Android SDK Platform (user-specified version, default 33)
 #   - Android Build Tools (matching the SDK version)
 #   - Android NDK (user-specified version, default 28.2.13676358)
-#   - Flutter (stable channel)
+#   - Flutter (user-specified version, or latest stable if unspecified)
 
 set -euo pipefail
 
@@ -41,6 +42,7 @@ FLUTTER_HOME="${HOME}/flutter"
 NON_INTERACTIVE=false
 SDK_VERSION_ARG=""
 NDK_VERSION_ARG=""
+FLUTTER_VERSION_ARG=""
 
 # ============================================================================
 # Helper functions
@@ -114,6 +116,19 @@ validate_ndk_version() {
     fi
 }
 
+# Validate: Flutter version must look like X.Y.Z (pre-release suffix like
+# '-1.0.pre' allowed) AND must exist as a tag in the official Flutter repo.
+validate_flutter_version() {
+    local v="$1"
+    if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.\-]+)?$ ]]; then
+        die "Invalid Flutter version format, expected 'X.Y.Z' (e.g. 3.24.0), but got: '$v'"
+    fi
+    info "Checking that Flutter $v exists in the official repository..."
+    if ! git ls-remote --tags --exit-code "$FLUTTER_REPO" "refs/tags/$v" >/dev/null 2>&1; then
+        die "Flutter version '$v' was not found in the official repository. See https://docs.flutter.dev/release/archive for the list of valid versions."
+    fi
+}
+
 # ============================================================================
 # Command-line arguments
 # ============================================================================
@@ -124,17 +139,20 @@ Usage: bash install-macos.sh [OPTIONS]
 
 Options:
   -y, --non-interactive   Run without prompts: use the default versions
-                          (or the values from --sdk / --ndk) and skip the
-                          confirmation step.
+                          (or the values from --sdk / --ndk / --flutter)
+                          and skip the confirmation step.
       --sdk <version>     Android SDK version to install (default: 33).
       --ndk <version>     Android NDK version to install
                           (default: 28.2.13676358).
+      --flutter <version> Flutter version tag to install, e.g. 3.24.0.
+                          If omitted, the latest stable release is used.
   -h, --help              Show this help and exit.
 
 Examples:
   bash install-macos.sh
   bash install-macos.sh --non-interactive
   bash install-macos.sh -y --sdk 34 --ndk 27.0.12077973
+  bash install-macos.sh -y --flutter 3.24.0
 EOF
 }
 
@@ -162,6 +180,15 @@ parse_args() {
                 ;;
             --ndk=*)
                 NDK_VERSION_ARG="${1#*=}"
+                shift
+                ;;
+            --flutter|--flutter-version)
+                [[ $# -ge 2 ]] || die "$1 requires a value"
+                FLUTTER_VERSION_ARG="$2"
+                shift 2
+                ;;
+            --flutter=*|--flutter-version=*)
+                FLUTTER_VERSION_ARG="${1#*=}"
                 shift
                 ;;
             -h|--help)
@@ -372,8 +399,14 @@ install_flutter() {
     if [[ -d "$FLUTTER_HOME" ]]; then
         info "Flutter directory already exists, skipping clone"
     else
-        info "Cloning Flutter $FLUTTER_CHANNEL..."
-        git clone --depth 1 -b "$FLUTTER_CHANNEL" "$FLUTTER_REPO" "$FLUTTER_HOME"
+        local flutter_ref="$FLUTTER_CHANNEL"
+        local flutter_desc="$FLUTTER_CHANNEL channel (latest)"
+        if [[ -n "$FLUTTER_VERSION" ]]; then
+            flutter_ref="$FLUTTER_VERSION"
+            flutter_desc="version $FLUTTER_VERSION"
+        fi
+        info "Cloning Flutter $flutter_desc..."
+        git clone --depth 1 -b "$flutter_ref" "$FLUTTER_REPO" "$FLUTTER_HOME"
     fi
 
     export PATH="$FLUTTER_HOME/bin:$PATH"
@@ -477,6 +510,21 @@ main() {
     validate_ndk_version "$NDK_VERSION"
     ok "NDK version: $NDK_VERSION"
 
+    local flutter_input
+    flutter_input=$(prompt "Enter the Flutter version (or 'latest')" "${FLUTTER_VERSION_ARG:-latest}")
+    flutter_input="${flutter_input#v}"
+    if [[ -z "$flutter_input" || "$flutter_input" == "latest" ]]; then
+        FLUTTER_VERSION=""
+        ok "Flutter: latest ($FLUTTER_CHANNEL channel)"
+    else
+        validate_flutter_version "$flutter_input"
+        FLUTTER_VERSION="$flutter_input"
+        ok "Flutter version: $FLUTTER_VERSION"
+    fi
+
+    local flutter_label="$FLUTTER_CHANNEL channel (latest)"
+    [[ -n "$FLUTTER_VERSION" ]] && flutter_label="version $FLUTTER_VERSION"
+
     echo
     info "About to install the following components:"
     echo "  - Homebrew (if not already installed)"
@@ -484,7 +532,7 @@ main() {
     echo "  - Android SDK Platform $SDK_VERSION"
     echo "  - Android Build Tools $SDK_VERSION.0.0"
     echo "  - Android NDK $NDK_VERSION"
-    echo "  - Flutter ($FLUTTER_CHANNEL channel)"
+    echo "  - Flutter ($flutter_label)"
     echo "  - Install directories: $ANDROID_HOME, $FLUTTER_HOME"
     echo
 
